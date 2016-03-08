@@ -214,7 +214,7 @@ request rq text = do
              >>= request rq
         else return text
         
-keyRequest, userRequest :: String
+keyRequest, userRequest, refreshRate :: String
 keyRequest  = "Please enter your Steam API key or save it to the file " ++ show keyFile ++ "."
 userRequest = "Please enter a Steam user id or save the default id to " ++ show userFile ++ "."
 refreshRate = "Please enter a refresh rate: r(ecent games only), g(ame stats), u(nlocked achievements), a(ll)"
