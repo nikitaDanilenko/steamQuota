@@ -6,7 +6,7 @@ import Control.Monad                   ( MonadPlus ( mzero ), unless )
 
 import Data.Aeson                      ( FromJSON ( parseJSON ), Value ( Object ), (.:), decode, Object )
 import Data.Aeson.Types                ( Parser )
-import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile, readFile, hGetContents ) --hGetContents unused
+import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile, readFile, hGetContents )
 import Data.Char                       ( toLower )
 import Data.HashMap.Lazy               ( lookup )
 import Data.List                       ( sortBy, intercalate )
