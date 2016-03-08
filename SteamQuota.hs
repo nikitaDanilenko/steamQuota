@@ -317,7 +317,7 @@ perGame key user gameLocal userLocal game = do
                     else simpleHttp gameQuery 
     let mgs = decode gameStatus :: Maybe FullGameStats
     case mgs of
-        Nothing -> --writeFile gameFile gameStatus >>
+        Nothing -> --writeFile gameFile gameStatus >> -- todo: proper closing required!
                    return Nothing
         Just fg -> do 
             userStatus <- if localUser
