@@ -200,11 +200,10 @@ evaluate gs =
           (g50, r3)  = span (>= 50) r2
           (g25, g0)  = span (>= 25) r3
 
+ownedQuery, userStatsQuery, schemaQuery, recentQuery :: String
 ownedQuery = "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?"
 userStatsQuery = "http://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/?appid="
-
 schemaQuery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key="
-
 recentQuery = "http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?"
 
 request :: String -> String -> IO String
