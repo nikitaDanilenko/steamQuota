@@ -1,26 +1,29 @@
+module SteamQuota where
 
-import Control.Applicative   ( (<$>), (<*>) )
-import Control.Arrow         ( (&&&) )
-import Control.Monad         ( MonadPlus ( mzero ), unless )
+import Control.Applicative             ( (<$>), (<*>) )
+import Control.Arrow                   ( (&&&) )
+import Control.Monad                   ( MonadPlus ( mzero ), unless )
 
-import Data.Aeson            ( FromJSON ( parseJSON ), Value ( Object ), 
-                               (.:), decode )
-import qualified Data.ByteString.Lazy.Char8 as L ( pack, unpack )
-import Data.HashMap.Lazy     ( lookup )
-import Data.List             ( sortBy, intercalate )
-import Data.Maybe            ( catMaybes )
-import Data.Text             ( pack )
-import qualified Data.Traversable as T     ( sequence )
+import Data.Aeson                      ( FromJSON ( parseJSON ), Value ( Object ), (.:), decode, Object )
+import Data.Aeson.Types                ( Parser )
+import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile )
+import Data.Char                       ( toLower )
+import Data.HashMap.Lazy               ( lookup )
+import Data.List                       ( sortBy, intercalate )
+import Data.Maybe                      ( catMaybes )
+import qualified Data.Text as Text     ( pack )
+import qualified Data.Traversable as T ( sequence )
 
-import Network               ( withSocketsDo )
-import Network.HTTP.Conduit  ( simpleHttp )
+import GHC.IO.Encoding                 ( setLocaleEncoding, utf8 )
 
-import System.Directory      ( createDirectory, doesDirectoryExist, doesFileExist )
-import System.FilePath.Posix ( pathSeparator )
+import Network                         ( withSocketsDo )
+import Network.HTTP.Conduit            ( simpleHttp )
 
-import Prelude hiding        ( lookup )
+import System.Directory                ( createDirectory, doesDirectoryExist, doesFileExist )
+import System.Environment              ( getArgs )
+import System.FilePath.Posix           ( pathSeparator )
 
-
+import Prelude hiding                  ( lookup, writeFile )
 
 -- Each Steam game is identified by an integer id.
 
@@ -30,11 +33,19 @@ type Id = Integer
 
 type PlayTime = Integer
 
-m .@ str = m .: pack str
+(.@) :: FromJSON a => Object -> String -> Parser a
+m .@ str = m .: Text.pack str
 
 -- A game consists of an ID and a play time value.
 	
 data Game = Game { gameId :: Id, playTime :: PlayTime } deriving Show
+
+instance Eq Game where
+
+    Game i _ == Game j _ = i == j
+
+alienSwarm :: Game
+alienSwarm = Game 630 100
 
 instance FromJSON Game where
 
@@ -44,19 +55,14 @@ instance FromJSON Game where
 -- User games are represented as the number of games in total and a list of games.
 	
 data UserGames = UserGames { totalGames :: Integer, -- number of games the user owns
-                             gamesList :: [Game]    -- list of game the user owns
+                             gamesList :: [Game]    -- list of games the user owns
 						   }
 	deriving Show
 
-addGame :: Game -> UserGames -> UserGames
-addGame g (UserGames t gs) = UserGames (1 + t) (g : gs)
-
-alienSwarm :: Game
-alienSwarm = Game 630 7740
-
 instance FromJSON UserGames where
 
-	parseJSON (Object m) = UserGames <$> m .@ "game_count" <*> m .@ "games"
+	parseJSON (Object m) = UserGames <$> (m .@ "response" >>= (.@ "game_count"))
+                                     <*> (m .@ "response" >>= (.@ "games"))
 	parseJSON _          = mzero
 
 -- An achievement consists of a name and a Boolean value whether it has been achieved yet or not.
@@ -90,31 +96,24 @@ setAchievable n (GameStats p g a _) = GameStats p g a n
     
 instance FromJSON GameStats where
 
-    parseJSON (Object m) = GameStats <$> (read <$> (m .@ "steamID"))
-                                     <*> m .@ "gameName"
+    parseJSON (Object m) = GameStats <$> (m .@ "playerstats" >>= (read <$>) . (.@ "steamID"))
+                                     <*> (m .@ "playerstats" >>= (.@ "gameName"))
                                      <*> achs
                                      <*> (length <$> achs)
-        where achs = m .@ "achievements"
+        where achs = m .@ "playerstats" >>= (.@ "achievements")
+    parseJSON _          = mzero
+    
+data RecentGames = RecentGames { recentGames :: [Game] } deriving Show
+
+instance FromJSON RecentGames where
+
+    parseJSON (Object m) = RecentGames <$> (m .@ "response" >>= (.@ "games"))
     parseJSON _          = mzero
 
-data Response = Response { getStats :: UserGames } deriving Show
-
-instance FromJSON Response where
-
-	parseJSON (Object m) = Response <$> m .@ "response"
-	parseJSON _          = mzero
-
-data PlayerStats = PlayerStats { gameStats :: GameStats } deriving Show
-
-instance FromJSON PlayerStats where
-
-	parseJSON (Object m) = PlayerStats <$> m .@ "playerstats"
-	parseJSON _          = mzero
-
-data FullAchievement = 
-    FullAchievement { achName        :: String, 
-                      achDisplayName :: String
-                    } deriving Show
+data FullAchievement = FullAchievement { achName        :: String, 
+                                         achDisplayName :: String
+                                       }
+    deriving Show
 
 instance FromJSON FullAchievement where
 
@@ -122,31 +121,16 @@ instance FromJSON FullAchievement where
                                            <*> m .@ "displayName"
     parseJSON _          = mzero
 
-data GameAchievements = GameAchievements { gameAchievements :: [FullAchievement] }
-    deriving Show
-
-instance FromJSON GameAchievements where
-    
-    parseJSON (Object m) = GameAchievements <$> m .@ "achievements"
-    parseJSON _          = mzero
-
 data FullGameStats = FullGameStats { fullGameName         :: String,
-                                     fullGameAchievements :: GameAchievements
+                                     fullGameAchievements :: [FullAchievement]
                                    }
     deriving Show
 
 instance FromJSON FullGameStats where
 
-    parseJSON (Object m) = FullGameStats <$> m .@ "gameName"
-                                         <*> m .@ "availableGameStats"
-    parseJSON _          = mzero
-
-data FullGame = FullGame { fullGameStats :: FullGameStats }
-    deriving Show
-
-instance FromJSON FullGame where
-
-    parseJSON (Object m) = FullGame <$> m .@ "game"
+    parseJSON (Object m) = FullGameStats <$> (m .@ "game" >>= (.@ "gameName"))
+                                         <*> (m .@ "game" >>= (.@ "availableGameStats") 
+                                                          >>= (.@ "achievements"))
     parseJSON _          = mzero
                                            
 achievedPerGame :: GameStats -> Int
@@ -175,8 +159,8 @@ totalAchieved = sum . map fst . toPrequotas
 totalAchievements :: [GameStats] -> Int
 totalAchievements = sum . map achievable
 
-totalAchievements2 :: FullGame -> Int
-totalAchievements2 = length . gameAchievements . fullGameAchievements . fullGameStats
+totalAchievements2 :: FullGameStats -> Int
+totalAchievements2 = length . fullGameAchievements
 
 totalQuota :: [GameStats] -> Double
 totalQuota gs = totalAchieved gs * 100 // totalAchievements gs
@@ -214,11 +198,74 @@ evaluate gs =
           (g50, r3)  = span (>= 50) r2
           (g25, g0)  = span (>= 25) r3
 
-pquery = "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?"
-gquery = "http://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/?appid="
+ownedQuery = "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?"
+userStatsQuery = "http://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/?appid="
 
-fquery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key="
-          
+schemaQuery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key="
+
+recentQuery = "http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?"
+
+request :: String -> String -> IO String
+request rq text = do
+    if null text 
+        then putStrLn rq
+             >> getLine 
+             >>= request rq
+        else return text
+        
+keyRequest, userRequest :: String
+keyRequest  = "Please enter your Steam API key or save it to the file " ++ show keyFile ++ "."
+userRequest = "Please enter a Steam user id or save the default id to " ++ show userFile ++ "."
+refreshRate = "Please enter a refresh rate: r(ecent games only), g(ame stats), u(nlocked achievements), a(ll)"
+
+requestKey, requestUser :: String -> IO String
+requestKey  = request keyRequest
+requestUser = request userRequest
+
+-- Requests a Steam API key and a user id from the user, until some valid information is obtained.
+
+obtainKeyUser :: [String] -> IO (String, String)
+obtainKeyUser (key : user : _) = return (key, user)
+obtainKeyUser _                = do
+    hasKey <- doesFileExist keyFile
+    hasUser <- doesFileExist userFile
+    key <- if hasKey then readFile keyFile >>= requestKey
+                     else requestKey ""
+    user <- if hasUser then readFile userFile >>= requestUser
+                       else requestUser ""
+    return (key, user)
+        
+main :: IO ()
+main = withSocketsDo $ do
+    setLocaleEncoding utf8
+    args <- getArgs
+    (key, user) <- obtainKeyUser args
+    putStrLn refreshRate
+    resp <- getLine
+    let refresh     = refreshFromString (map toLower resp)
+        querySuffix = "key=" ++ key ++ "&steamid=" ++ user ++ "&format=json"
+    checkGamesDirectory
+    checkMakeDir user
+    owned <- simpleHttp (ownedQuery ++ querySuffix)
+    recent <- simpleHttp (recentQuery ++ querySuffix)
+    let gamesOwned  = fmap ((alienSwarm :) . gamesList) (decode owned) :: Maybe [Game]
+        gamesRecent = fmap recentGames (decode recent) :: Maybe [Game]
+    case (gamesOwned, gamesRecent) of
+        (Just os, Just rs) -> mapM (\g -> perGame key 
+                                                  user 
+                                                  (keepGameLocal refresh) 
+                                                  (keepUserLocal refresh && g `notElem` rs) 
+                                                  g)
+                                   os
+                              >>= putStrLn . evaluate . catMaybes
+        _                  -> putStrLn "Error while parsing."
+
+refreshFromString :: String -> Refresh
+refreshFromString ('r' : _) = Recent
+refreshFromString ('g' : _) = OnlyAchievable
+refreshFromString ('u' : _) = OnlyAchieved
+refreshFromString _         = All
+
 -- -- main2 :: String -> String -> IO ()
 -- main2 key lab = withSocketsDo $ do
 	-- -- putStrLn "Please enter your Steam API Key"
@@ -226,7 +273,7 @@ fquery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key="
 	-- -- putStrLn "Please enter the desired Steam ID"
 	-- -- lab <- getLine
     -- let query = "key=" ++ key ++ "&steamid=" ++ lab ++ "&format=json"
-    -- res <- simpleHttp (pquery ++ query)
+    -- res <- simpleHttp (ownedQuery ++ query)
     -- maybe (error "Something went wrong") (collect query) (decode res :: Maybe Response)
  -- where
     -- collect query r = mapM (perGame key lab) (alienSwarm : gamesList (getStats r)) 
@@ -237,6 +284,12 @@ fquery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key="
 gamesDirectory :: String
 gamesDirectory = "games"
                       
+keyFile :: String
+keyFile = "keyfile"
+
+userFile :: String
+userFile = "defaultuser"
+
 -- Check whether a directory exists and create it in the negative case.
                       
 checkMakeDir :: String -> IO ()
@@ -251,6 +304,8 @@ checkGamesDirectory = checkMakeDir gamesDirectory
 dirPath :: [String] -> String
 dirPath = intercalate [pathSeparator]
 
+-- A data type that represents, what information needs to be updated.
+
 data Refresh = Recent | OnlyAchieved | OnlyAchievable | All deriving Eq
 
 keepGameLocal :: Refresh -> Bool
@@ -262,45 +317,34 @@ keepUserLocal :: Refresh -> Bool
 keepUserLocal OnlyAchievable = True
 keepUserLocal _              = False
 
-perGame :: Refresh -> String -> String -> Game -> IO (Maybe GameStats)
-perGame refresh key user game = do
+-- likely more elegant with a transformer.
+
+perGame :: String -> String -> Bool -> Bool -> Game -> IO (Maybe GameStats)
+perGame key user gameLocal userLocal game = do
     hasGame <- doesFileExist gameFile
     hasUser <- doesFileExist userFile
-    let localGame = keepGameLocal refresh && hasGame
-        localUser = keepUserLocal refresh && hasUser
+    let localGame = gameLocal && hasGame
+        localUser = userLocal && hasUser
     gameStatus <- if localGame
                     then fetch gameFile
                     else simpleHttp gameQuery
-    userStatus <- if localUser
-                    then fetch userFile
-                    else simpleHttp userQuery
-    let mstats = do fg <- decode gameStatus
-                    user <- decode userStatus
-                    return (setAchievable (totalAchievements2 fg) (gameStats user))
-    T.sequence (fmap (\_ ->    update localGame gameFile gameStatus
-                            >> update localUser userFile userStatus) mstats)
-    return mstats
+    let mgs = decode gameStatus :: Maybe FullGameStats
+    case mgs of
+        Nothing -> return Nothing
+        Just fg -> do 
+            userStatus <- if localUser
+                            then fetch userFile
+                            else simpleHttp userQuery
+            let mstats = fmap (setAchievable (totalAchievements2 fg)) (decode userStatus)
+            T.sequence (fmap (\_ ->    update localGame gameFile gameStatus
+                                    >> update localUser userFile userStatus) mstats)
+            return mstats
     where 
         gameFile           = dirPath [gamesDirectory, gameLabel]
         userFile           = dirPath [user, gameLabel]
-        fetch              = fmap L.pack . readFile
-        update b file text = unless b (writeFile file (L.unpack text))
+        fetch              = fmap pack . readFile
+        update b file text = unless b (writeFile file text)
         gameLabel          = show (gameId game)
-        gameQuery          = fquery ++ key ++ "&appid=" ++ gameLabel
-        userQuery          = fquery ++ gameLabel ++ "&key=" 
-                                    ++ key ++ "&steamid=" ++ user
-        
-    
-    -- testQuery <- simpleHttp (fquery ++ key ++ "&appid=" ++ show (gameId game))
-    -- case decode testQuery of
-        -- Nothing -> return Nothing
-        -- Just fg -> fmap ( maybe Nothing 
-                                -- (Just . setAchievable (totalAchievements2 fg) 
-                                      -- . gameStats )
-                                 -- . decode)
-                   -- (simpleHttp (gquery ++ show (gameId game) 
-                                       -- ++ "&key=" 
-                                       -- ++ key
-                                       -- ++ "&steamid=" 
-                                       -- ++ lab 
-                                       -- ++ "&format=json"))
+        gameQuery          = schemaQuery ++ key ++ "&appid=" ++ gameLabel ++ "&format=json"
+        userQuery          = userStatsQuery ++ gameLabel ++ "&key=" 
+                                    ++ key ++ "&steamid=" ++ user ++ "&format=json"
