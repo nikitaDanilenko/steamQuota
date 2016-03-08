@@ -6,7 +6,7 @@ import Control.Monad                   ( MonadPlus ( mzero ), unless )
 
 import Data.Aeson                      ( FromJSON ( parseJSON ), Value ( Object ), (.:), decode, Object )
 import Data.Aeson.Types                ( Parser )
-import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile )
+import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile, readFile, hGetContents )
 import Data.Char                       ( toLower )
 import Data.HashMap.Lazy               ( lookup )
 import Data.List                       ( sortBy, intercalate )
@@ -22,8 +22,10 @@ import Network.HTTP.Conduit            ( simpleHttp )
 import System.Directory                ( createDirectory, doesDirectoryExist, doesFileExist )
 import System.Environment              ( getArgs )
 import System.FilePath.Posix           ( pathSeparator )
+import System.IO                       ( openFile, IOMode ( ReadMode, WriteMode ), hClose )
 
-import Prelude hiding                  ( lookup, writeFile )
+import Prelude hiding                  ( lookup, writeFile, readFile )
+import qualified Prelude as P          ( readFile )
 
 -- Each Steam game is identified by an integer id.
 
@@ -175,21 +177,21 @@ str .+ x = str ++ show x
 
 evaluate :: [GameStats] -> String
 evaluate gs = 
-	unlines [
-        "Total achieved                  : " .+ totalAchieved gs,
-	    "Total achievable                : " .+ totalAchievements gs,
-		"Absolute quota                  : " .+ roundAt 3 (totalQuota gs),
-		"Average completion rate (exact) : " .+ roundAt 3 (average qs),
-		"Average completion rate (biased): " .+ roundAt 3 (average (quotasWith 0 gs)),
+	unlines [                
+        "Total achieved                   : " .+ totalAchieved gs,
+	    "Total achievable                 : " .+ totalAchievements gs,
+		"Absolute quota                   : " .+ roundAt 3 (totalQuota gs),
+		"Average completion rate (exact)  : " .+ roundAt 3 (average qs),
+		"Average completion rate (biased) : " .+ roundAt 3 (average (quotasWith 0 gs)),
 		"",
-		"Perfect games                   : " .+ length g100,
-		"75% <= x < 100%                 : " .+ length g75,
-		"50% <= x < 75%                  : " .+ length g50,
-		"25% <= x < 50%                  : " .+ length g25,
-		"0%  <= x < 25%                  : " .+ length g0,
+		"Perfect games                    : " .+ length g100,
+		"75% <= x < 100%                  : " .+ length g75,
+		"50% <= x < 75%                   : " .+ length g50,
+		"25% <= x < 50%                   : " .+ length g25,
+		"0%  <= x < 25%                   : " .+ length g0,
 		"",
-		"Total number of games           : " .+ length qs,
-		"Sum of the above                : " .+ sum (map length [g100, g75, g50, g25, g0])
+		"(Played) games with achievements : " .+ length qs,
+		"Sum of the above                 : " .+ sum (map length [g100, g75, g50, g25, g0])
 			 ]
     where qs         = quotasWith (-1) gs
           ps         = sortBy (flip compare) qs
@@ -229,9 +231,9 @@ obtainKeyUser (key : user : _) = return (key, user)
 obtainKeyUser _                = do
     hasKey <- doesFileExist keyFile
     hasUser <- doesFileExist userFile
-    key <- if hasKey then readFile keyFile >>= requestKey
+    key <- if hasKey then P.readFile keyFile >>= requestKey
                      else requestKey ""
-    user <- if hasUser then readFile userFile >>= requestUser
+    user <- if hasUser then P.readFile userFile >>= requestUser
                        else requestUser ""
     return (key, user)
         
@@ -250,34 +252,20 @@ main = withSocketsDo $ do
     recent <- simpleHttp (recentQuery ++ querySuffix)
     let gamesOwned  = fmap ((alienSwarm :) . gamesList) (decode owned) :: Maybe [Game]
         gamesRecent = fmap recentGames (decode recent) :: Maybe [Game]
-    case (gamesOwned, gamesRecent) of
-        (Just os, Just rs) -> mapM (\g -> perGame key 
-                                                  user 
-                                                  (keepGameLocal refresh) 
-                                                  (keepUserLocal refresh && g `notElem` rs) 
-                                                  g)
-                                   os
+        updateUser g = maybe (keepUserLocal refresh) 
+                             (\rs ->    (g `notElem` rs || keepUserLocal refresh)
+                                     && (g `elem` rs || refresh == Recent || refresh == OnlyAchieved))
+                             gamesRecent
+    case gamesOwned of
+        Just os -> mapM (\g -> perGame key user (keepGameLocal refresh) (updateUser g) g) os
                               >>= putStrLn . evaluate . catMaybes
-        _                  -> putStrLn "Error while parsing."
+        _                  -> putStrLn ("Error while parsing: " ++ unpack owned ++ unpack recent)
 
 refreshFromString :: String -> Refresh
 refreshFromString ('r' : _) = Recent
 refreshFromString ('g' : _) = OnlyAchievable
 refreshFromString ('u' : _) = OnlyAchieved
 refreshFromString _         = All
-
--- -- main2 :: String -> String -> IO ()
--- main2 key lab = withSocketsDo $ do
-	-- -- putStrLn "Please enter your Steam API Key"
-	-- -- key <- getLine
-	-- -- putStrLn "Please enter the desired Steam ID"
-	-- -- lab <- getLine
-    -- let query = "key=" ++ key ++ "&steamid=" ++ lab ++ "&format=json"
-    -- res <- simpleHttp (ownedQuery ++ query)
-    -- maybe (error "Something went wrong") (collect query) (decode res :: Maybe Response)
- -- where
-    -- collect query r = mapM (perGame key lab) (alienSwarm : gamesList (getStats r)) 
-                      -- >>= putStrLn . evaluate . catMaybes
 
 -- The directory in which the global game information is stored.
                       
@@ -326,25 +314,25 @@ perGame key user gameLocal userLocal game = do
     let localGame = gameLocal && hasGame
         localUser = userLocal && hasUser
     gameStatus <- if localGame
-                    then fetch gameFile
-                    else simpleHttp gameQuery
+                    then readFile gameFile
+                    else simpleHttp gameQuery 
     let mgs = decode gameStatus :: Maybe FullGameStats
     case mgs of
-        Nothing -> return Nothing
+        Nothing -> --writeFile gameFile gameStatus >>
+                   return Nothing
         Just fg -> do 
             userStatus <- if localUser
-                            then fetch userFile
+                            then readFile userFile
                             else simpleHttp userQuery
             let mstats = fmap (setAchievable (totalAchievements2 fg)) (decode userStatus)
             T.sequence (fmap (\_ ->    update localGame gameFile gameStatus
                                     >> update localUser userFile userStatus) mstats)
             return mstats
     where 
-        gameFile           = dirPath [gamesDirectory, gameLabel]
-        userFile           = dirPath [user, gameLabel]
-        fetch              = fmap pack . readFile
-        update b file text = unless b (writeFile file text)
-        gameLabel          = show (gameId game)
-        gameQuery          = schemaQuery ++ key ++ "&appid=" ++ gameLabel ++ "&format=json"
-        userQuery          = userStatsQuery ++ gameLabel ++ "&key=" 
-                                    ++ key ++ "&steamid=" ++ user ++ "&format=json"
+        gameFile      = dirPath [gamesDirectory, gameLabel]
+        userFile      = dirPath [user, gameLabel]
+        update b file = unless b . writeFile file 
+        gameLabel     = show (gameId game)
+        gameQuery     = schemaQuery ++ key ++ "&appid=" ++ gameLabel ++ "&format=json"
+        userQuery     = userStatsQuery ++ gameLabel ++ "&key=" 
+                                       ++ key ++ "&steamid=" ++ user ++ "&format=json"
