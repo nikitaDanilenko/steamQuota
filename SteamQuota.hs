@@ -1,32 +1,35 @@
 module SteamQuota where
 
-import Control.Applicative             ( (<$>), (<*>) )
-import Control.Arrow                   ( (&&&) )
-import Control.Monad                   ( MonadPlus ( mzero ), unless )
-import Control.Monad.Trans.Class       ( lift )
-import Control.Monad.Trans.Maybe       ( MaybeT, runMaybeT )
+import Control.Applicative                        ( (<$>), (<*>), liftA2 )
+import Control.Arrow                              ( (&&&) )
+import Control.Monad                              ( MonadPlus ( mzero ), unless )
+import Control.Monad.Trans.Class                  ( lift )
+import Control.Monad.Trans.Maybe                  ( MaybeT ( .. ), runMaybeT )
 
-import Data.Aeson                      ( FromJSON ( parseJSON ), Value ( Object ), (.:), decode, Object )
-import Data.Aeson.Types                ( Parser )
-import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile, readFile, ByteString, split, filter )
-import Data.Char                       ( toLower )
-import Data.HashMap.Lazy               ( lookup )
-import Data.List                       ( sortBy, intercalate )
-import Data.Maybe                      ( catMaybes )
-import qualified Data.Text as Text     ( pack )
-import qualified Data.Traversable as T ( sequence )
+import Data.Aeson                                 ( FromJSON ( parseJSON ), Value ( Object ),
+                                                    (.:), decode, Object )
+import Data.Aeson.Types                           ( Parser )
+import Data.ByteString.Lazy.Char8                 ( pack, unpack, writeFile, readFile, ByteString,
+                                                    split,  isPrefixOf )
+import qualified Data.ByteString.Lazy.Char8 as BS ( concat, filter )
+import Data.Char                                  ( toLower )
+import Data.HashMap.Lazy                          ( lookup )
+import Data.List                                  ( sortBy, intercalate )
+import Data.Maybe                                 ( catMaybes, fromMaybe )
+import qualified Data.Text as Text                ( pack )
+import qualified Data.Traversable as T            ( sequence )
 
-import GHC.IO.Encoding                 ( setLocaleEncoding, utf8 )
+import GHC.IO.Encoding                            ( setLocaleEncoding, utf8 )
 
-import Network                         ( withSocketsDo )
-import Network.HTTP.Conduit            ( simpleHttp )
+import Network                                    ( withSocketsDo )
+import Network.HTTP.Conduit                       ( simpleHttp )
 
-import System.Directory                ( createDirectory, doesDirectoryExist, doesFileExist )
-import System.Environment              ( getArgs )
-import System.FilePath.Posix           ( pathSeparator )
+import System.Directory                           ( createDirectory, doesDirectoryExist, doesFileExist )
+import System.Environment                         ( getArgs )
+import System.FilePath.Posix                      ( pathSeparator )
 
-import Prelude hiding                  ( lookup, writeFile, readFile, filter )
-import qualified Prelude as P          ( readFile, filter, lookup )
+import Prelude hiding                             ( lookup, writeFile, readFile )
+import qualified Prelude as P                     ( readFile, lookup )
 
 -- Each Steam game is identified by an integer id.
 
@@ -142,7 +145,7 @@ instance FromJSON FullGameStats where
 -- Computes how many achievements have been achieved per game.
                                  
 achievedPerGame :: GameStats -> Int
-achievedPerGame = length . P.filter achievementStatus . achievements
+achievedPerGame = length . filter achievementStatus . achievements
 
 -- Computes the quota (achieved/achievable) per game (double precision).
 
@@ -171,7 +174,7 @@ average = uncurry (/) . foldr (\x (s, l) -> (x + s, 1 + l)) (0, 0)
 -- A game counts towars the total value only if at least one achievement has been unlocked.
 
 toPrequotas :: [GameStats] -> [(Int, Int)]
-toPrequotas = map (achievedPerGame &&& achievable) . P.filter ((> 0) . quotaPerGame)
+toPrequotas = map (achievedPerGame &&& achievable) . filter ((> 0) . quotaPerGame)
 
 totalAchieved :: [GameStats] -> Int
 totalAchieved = sum . map fst . toPrequotas
@@ -391,42 +394,81 @@ perGame key user gameLocal userLocal game = do
         userQuery     = concat [userStatsQuery, gameLabel, "&", keyString, 
                                 key, "&", steamID, user, "&", jsonFormat]
 
-matchParameters :: [ByteString] -> Maybe (ByteString, ByteString)
+matchParameters :: [ByteString] -> (ByteString, ByteString)
 matchParameters args = 
-  do key  <- P.lookup (pack "key") kvs
-     user <- P.lookup (pack "user") kvs
-     return (key, user)
+  (fromMaybe defaultToFile (P.lookup (pack "key") kvs),
+   fromMaybe defaultToFile (P.lookup (pack "user") kvs))
 
-    where kvs = map (toPair . split '=' . filter (' ' /=)) args
+    where kvs = map (toPair . split '=' . BS.filter (' ' /=)) args
           
           toPair (x : y : _) = (x, y)
           toPair _           = error "Require the format \"<key>=<value>\""
 
+-- The default parameter for both keys.
+
+defaultToFile :: ByteString
+defaultToFile = pack "file"
+
+-- Check if one wishes to use local keys/users and whether the files exist.
+-- If they do not, an error is thrown.
+
+processKeyUser :: ByteString -> ByteString -> IO (Maybe ByteString, Maybe ByteString)
+processKeyUser key user = do 
+  actualKey  <- findActual keyFile key
+  actualUser <- findActual userFile user
+  return (actualKey, actualUser)
+
+    where 
+     findActual fileCandidate param
+      | param == defaultToFile = do filePresent <- doesFileExist fileCandidate
+                                    if filePresent
+                                      then fmap Just (readFile fileCandidate)
+                                      else return Nothing
+      | otherwise              = return (Just param)
+
+malformedArgs :: [ByteString] -> MaybeT IO (ByteString, ByteString)
+malformedArgs =
+  MaybeT . fmap (uncurry (liftA2 (,))) . uncurry processKeyUser . matchParameters
+
+helpAsked :: [ByteString] -> Bool
+helpAsked (arg : _) = pack "-h" `isPrefixOf` arg
+helpAsked _         = False
+
+manPage :: String
+manPage = "help"
+
 main :: IO ()
 main = withSocketsDo $ do
     setLocaleEncoding utf8
-    args <- getArgs
-    (key, user) <- obtainKeyUser args
-    putStrLn refreshRate
-    resp <- getLine
-    let refresh     = refreshFromString (map toLower resp)
-        querySuffix = concat [keyString, key, "&", steamID, user, 
-                                              "&", includeFree, "&", jsonFormat]
-    checkGamesDirectory
-    checkMakeDir user
-    owned <- simpleHttp (ownedQuery ++ querySuffix)
-    recent <- simpleHttp (recentQuery ++ querySuffix)
-    let gamesOwned  = fmap gamesList (decode owned) :: Maybe [Game]
-        gamesRecent = fmap recentGames (decode recent) :: Maybe [Game]
-        updateUser g = maybe (keepUserLocal refresh) 
-                             (\rs ->    (g `notElem` rs || keepUserLocal refresh)
-                                     && (g `elem` rs || refresh == Recent || refresh == OnlyAchieved))
-                             gamesRecent
-    case gamesOwned of
-        Just os -> mapM (\g -> runMaybeT (perGame key 
-                                                  user 
-                                                  (keepGameLocal refresh) 
-                                                  (updateUser g) 
-                                                 g)) os
-                              >>= putStrLn . evaluate . catMaybes
-        _                  -> putStrLn ("Error while parsing: " ++ unpack owned ++ unpack recent)
+    args <- fmap (map pack) getArgs
+    if helpAsked args
+      then putStrLn manPage
+      else do 
+        mku <- runMaybeT (malformedArgs args)
+        case mku of
+          Nothing -> putStrLn manPage
+          Just (keyBS, userBS) -> do 
+            let (key, user) = (unpack keyBS, unpack userBS)
+            putStrLn refreshRate
+            resp <- getLine
+            let refresh     = refreshFromString (map toLower resp)
+                querySuffix = concat [keyString, key, "&", steamID, user, 
+                                                      "&", includeFree, "&", jsonFormat]
+            checkGamesDirectory
+            checkMakeDir user
+            owned <- simpleHttp (ownedQuery ++ querySuffix)
+            recent <- simpleHttp (recentQuery ++ querySuffix)
+            let gamesOwned  = fmap gamesList (decode owned) :: Maybe [Game]
+                gamesRecent = fmap recentGames (decode recent) :: Maybe [Game]
+                updateUser g = maybe (keepUserLocal refresh) 
+                                     (\rs ->    (g `notElem` rs || keepUserLocal refresh)
+                                             && (g `elem` rs || refresh == Recent || refresh == OnlyAchieved))
+                                     gamesRecent
+            case gamesOwned of
+                Just os -> mapM (\g -> runMaybeT (perGame key 
+                                                          user 
+                                                          (keepGameLocal refresh) 
+                                                          (updateUser g) 
+                                                         g)) os
+                                      >>= putStrLn . evaluate . catMaybes
+                _                  -> putStrLn ("Error while parsing: " ++ unpack owned ++ unpack recent)
