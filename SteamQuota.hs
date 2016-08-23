@@ -239,27 +239,9 @@ schemaQuery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?
 recentQuery = "http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?"
 includeFree = "include_played_free_games=1"
 
--- Request a non-empty string until such a string has been provided.
+-- Request string for the refresh rates.
 
-request :: String -> String -> IO String
-request rq text = do
-    if null text 
-        then putStrLn rq
-             >> getLine 
-             >>= request rq
-        else return text
-
--- Request a key/user respectively, until some non-empty information has been supplied.
-
-requestKey, requestUser :: String -> IO String
-requestKey  = request keyRequest
-requestUser = request userRequest
-
--- Request strings for the requests of keys, user ids, and refresh rates.
-
-keyRequest, userRequest, refreshRate :: String
-keyRequest  = "Please enter your Steam API key or save it to the file " ++ show keyFile ++ "."
-userRequest = "Please enter a Steam user id or save the default id to " ++ show userFile ++ "."
+refreshRate :: String
 refreshRate = intercalate "\n" [
                        "Please enter a refresh rate:",
                        "r(ecent): update stats on recently played games (up to ten) only",
@@ -267,19 +249,6 @@ refreshRate = intercalate "\n" [
                        "u(nlocked): update unlocked achievements only",
                        "a(ll): update all information (may take a minute)"
                       ]
-
--- Requests a Steam API key and a user id from the user, until some valid information is obtained.
-
-obtainKeyUser :: [String] -> IO (String, String)
-obtainKeyUser (key : user : _) = return (key, user)
-obtainKeyUser _                = do
-    hasKey <- doesFileExist keyFile
-    hasUser <- doesFileExist userFile
-    key <- if hasKey then P.readFile keyFile >>= requestKey
-                     else requestKey ""
-    user <- if hasUser then P.readFile userFile >>= requestUser
-                       else requestUser ""
-    return (key, user)
         
 -- Map words beginning with the right letters to refresh rates.
 
@@ -394,6 +363,11 @@ perGame key user gameLocal userLocal game = do
         userQuery     = concat [userStatsQuery, gameLabel, "&", keyString, 
                                 key, "&", steamID, user, "&", jsonFormat]
 
+-- This function treats the parameter list as a key-value-map and tries to find the values for
+-- the Steam API key and the user.
+-- If one of these values is not found, it is assumed that the user desires to use local files
+-- for this particular value.
+
 matchParameters :: [ByteString] -> (ByteString, ByteString)
 matchParameters args = 
   (fromMaybe defaultToFile (P.lookup (pack "key") kvs),
@@ -426,16 +400,25 @@ processKeyUser key user = do
                                       else return Nothing
       | otherwise              = return (Just param)
 
-malformedArgs :: [ByteString] -> MaybeT IO (ByteString, ByteString)
-malformedArgs =
-  MaybeT . fmap (uncurry (liftA2 (,))) . uncurry processKeyUser . matchParameters
+-- Check if the user asked for a help file.
 
 helpAsked :: [ByteString] -> Bool
 helpAsked (arg : _) = pack "-h" `isPrefixOf` arg
 helpAsked _         = False
 
+-- Description of usage.
+
 manPage :: String
-manPage = "help"
+manPage = intercalate "\n" [
+  "This program takes two optional arguments",
+  "  key=<steamAPIKeyHere>",
+  "  user=<desiredUser>",
+  "If one of these is missing or the parameter is 'file',",
+  "it is assumed that you have saved the necessary information",
+  "in a local file. The files are",
+  "  " ++ keyFile  ++ " for the key",
+  "  " ++ userFile ++ " for the user."
+  ]
 
 main :: IO ()
 main = withSocketsDo $ do
@@ -444,7 +427,7 @@ main = withSocketsDo $ do
     if helpAsked args
       then putStrLn manPage
       else do 
-        mku <- runMaybeT (malformedArgs args)
+        mku <- fmap (uncurry (liftA2 (,))) (uncurry processKeyUser (matchParameters args))
         case mku of
           Nothing -> putStrLn manPage
           Just (keyBS, userBS) -> do 
