@@ -8,7 +8,7 @@ import Control.Monad.Trans.Maybe       ( MaybeT, runMaybeT )
 
 import Data.Aeson                      ( FromJSON ( parseJSON ), Value ( Object ), (.:), decode, Object )
 import Data.Aeson.Types                ( Parser )
-import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile, readFile, ByteString )
+import Data.ByteString.Lazy.Char8      ( pack, unpack, writeFile, readFile, ByteString, split, filter )
 import Data.Char                       ( toLower )
 import Data.HashMap.Lazy               ( lookup )
 import Data.List                       ( sortBy, intercalate )
@@ -25,8 +25,8 @@ import System.Directory                ( createDirectory, doesDirectoryExist, do
 import System.Environment              ( getArgs )
 import System.FilePath.Posix           ( pathSeparator )
 
-import Prelude hiding                  ( lookup, writeFile, readFile )
-import qualified Prelude as P          ( readFile )
+import Prelude hiding                  ( lookup, writeFile, readFile, filter )
+import qualified Prelude as P          ( readFile, filter, lookup )
 
 -- Each Steam game is identified by an integer id.
 
@@ -48,12 +48,6 @@ data Game = Game { gameId :: Id, playTime :: PlayTime } deriving Show
 instance Eq Game where
 
     Game i _ == Game j _ = i == j
-
--- Alien Swarm is a free game, whose game stats are bugged: due to the fact that it is free,
--- apparently no user owns it, which is why it is added by hand
-
-alienSwarm :: Game
-alienSwarm = Game 630 100
 
 instance FromJSON Game where
 
@@ -148,7 +142,7 @@ instance FromJSON FullGameStats where
 -- Computes how many achievements have been achieved per game.
                                  
 achievedPerGame :: GameStats -> Int
-achievedPerGame = length . filter achievementStatus . achievements
+achievedPerGame = length . P.filter achievementStatus . achievements
 
 -- Computes the quota (achieved/achievable) per game (double precision).
 
@@ -177,7 +171,7 @@ average = uncurry (/) . foldr (\x (s, l) -> (x + s, 1 + l)) (0, 0)
 -- A game counts towars the total value only if at least one achievement has been unlocked.
 
 toPrequotas :: [GameStats] -> [(Int, Int)]
-toPrequotas = map (achievedPerGame &&& achievable) . filter ((> 0) . quotaPerGame)
+toPrequotas = map (achievedPerGame &&& achievable) . P.filter ((> 0) . quotaPerGame)
 
 totalAchieved :: [GameStats] -> Int
 totalAchieved = sum . map fst . toPrequotas
@@ -198,6 +192,8 @@ quotasWith n = map (roundAt n . uncurry (\x y -> 100 * x // y)) . toPrequotas
 
 (.+) :: Show a => String -> a -> String
 str .+ x = str ++ show x
+
+-- This function computes a String that can be presented to show the achievement status.
 
 evaluate :: [GameStats] -> String
 evaluate gs = 
@@ -230,13 +226,15 @@ evaluate gs =
    userStatsQuery: for querying individual game stats per user per game
    schemaQuery: for querying game information with respect to achievements
    recentQuery: querying the list of recently played games of a user.
+   includeFree: free games are not owned, which is why the need to be treated separately
 -}
 
-ownedQuery, userStatsQuery, schemaQuery, recentQuery :: String
+ownedQuery, userStatsQuery, schemaQuery, recentQuery, includeFree :: String
 ownedQuery = "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?"
 userStatsQuery = "http://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/?appid="
 schemaQuery = "http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key="
 recentQuery = "http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?"
+includeFree = "include_played_free_games=1"
 
 -- Request a non-empty string until such a string has been provided.
 
@@ -344,6 +342,21 @@ readOrFetch :: Bool -> String -> String -> IO ByteString
 readOrFetch b local fetch | b         = readFile local
                           | otherwise = simpleHttp fetch
 
+-- A string that denotes the required JSON format.
+
+jsonFormat :: String
+jsonFormat = "format=json"
+
+-- A string denoting the steamID
+
+steamID :: String
+steamID = "steamID="
+
+-- A string denoting the key specification.
+
+keyString :: String
+keyString = "key="
+
 -- Action per game.
 -- This function checks whether any local data concerning the game or user exists.
 -- If it exists and only local data is required, the local data is read.
@@ -374,9 +387,20 @@ perGame key user gameLocal userLocal game = do
         userFile      = dirPath [user, gameLabel]
         update b file = unless b . writeFile file 
         gameLabel     = show (gameId game)
-        gameQuery     = schemaQuery ++ key ++ "&appid=" ++ gameLabel ++ "&format=json"
-        userQuery     = userStatsQuery ++ gameLabel ++ "&key=" 
-                                       ++ key ++ "&steamid=" ++ user ++ "&format=json"
+        gameQuery     = concat [schemaQuery, key, "&appid=", gameLabel, jsonFormat]
+        userQuery     = concat [userStatsQuery, gameLabel, "&", keyString, 
+                                key, "&", steamID, user, "&", jsonFormat]
+
+matchParameters :: [ByteString] -> Maybe (ByteString, ByteString)
+matchParameters args = 
+  do key  <- P.lookup (pack "key") kvs
+     user <- P.lookup (pack "user") kvs
+     return (key, user)
+
+    where kvs = map (toPair . split '=' . filter (' ' /=)) args
+          
+          toPair (x : y : _) = (x, y)
+          toPair _           = error "Require the format \"<key>=<value>\""
 
 main :: IO ()
 main = withSocketsDo $ do
@@ -386,12 +410,13 @@ main = withSocketsDo $ do
     putStrLn refreshRate
     resp <- getLine
     let refresh     = refreshFromString (map toLower resp)
-        querySuffix = "key=" ++ key ++ "&steamid=" ++ user ++ "&format=json"
+        querySuffix = concat [keyString, key, "&", steamID, user, 
+                                              "&", includeFree, "&", jsonFormat]
     checkGamesDirectory
     checkMakeDir user
     owned <- simpleHttp (ownedQuery ++ querySuffix)
     recent <- simpleHttp (recentQuery ++ querySuffix)
-    let gamesOwned  = fmap ((alienSwarm :) . gamesList) (decode owned) :: Maybe [Game]
+    let gamesOwned  = fmap gamesList (decode owned) :: Maybe [Game]
         gamesRecent = fmap recentGames (decode recent) :: Maybe [Game]
         updateUser g = maybe (keepUserLocal refresh) 
                              (\rs ->    (g `notElem` rs || keepUserLocal refresh)
