@@ -94,7 +94,7 @@ toBool _ = True
 data GameStats = GameStats { playerID :: Id,                -- stats for which player?
                              gameName :: String,            -- name of the game
                              achievements :: [Achievement], -- list of achievements
-                             achievable :: Int
+                             achievable :: Int              -- number of achievables
                            }
     deriving Show
 
@@ -196,11 +196,29 @@ quotasWith n = map (roundAt n . uncurry (\x y -> 100 * x // y)) . toPrequotas
 (.+) :: Show a => String -> a -> String
 str .+ x = str ++ show x
 
+-- An encapsulated representation of time.
+
+data Duration = Duration { hours :: Integer, minutes :: Integer }
+
+instance Show Duration where
+  show (Duration h m) | h < 0 = minutes
+                      | otherwise = unwords [hours, minutes]
+                      where minutes = unwords [show m, "minutes"]
+                            hours   = unwords [show h, "hours", "and"]
+
+-- Transforms an amount of minutes into a duration.
+
+minutesToDuration :: Integer -> Duration
+minutesToDuration ms | ms > 0    = Duration q r
+                     | otherwise = Duration 0 0
+  where (q, r) = quotRem ms 60
+
 -- This function computes a String that can be presented to show the achievement status.
 
-evaluate :: [GameStats] -> String
-evaluate gs = 
+evaluate :: Integer -> [GameStats] -> String
+evaluate totalPlaytime gs = 
     unlines [                
+        "Time spent on games              : " .+ minutesToDuration totalPlaytime,
         "Total achieved                   : " .+ totalAchieved gs,
         "Total achievable                 : " .+ totalAchievements gs,
         "Absolute quota                   : " .+ roundAt 3 (totalQuota gs),
@@ -448,10 +466,11 @@ main = withSocketsDo $ do
                                              && (g `elem` rs || refresh == Recent || refresh == OnlyAchieved))
                                      gamesRecent
             case gamesOwned of
-                Just os -> mapM (\g -> runMaybeT (perGame key 
+                Just os -> let totalPlayTime = sum (map playTime os)
+                           in mapM (\g -> runMaybeT (perGame key 
                                                           user 
                                                           (keepGameLocal refresh) 
                                                           (updateUser g) 
                                                          g)) os
-                                      >>= putStrLn . evaluate . catMaybes
+                                      >>= putStrLn . evaluate totalPlayTime . catMaybes
                 _                  -> putStrLn ("Error while parsing: " ++ unpack owned ++ unpack recent)
