@@ -2,6 +2,7 @@ module SteamQuota where
 
 import Control.Applicative                        ( (<$>), (<*>), liftA2 )
 import Control.Arrow                              ( (&&&) )
+import qualified Control.Exception as E           ( catch )
 import Control.Monad                              ( MonadPlus ( mzero ), unless )
 import Control.Monad.Trans.Class                  ( lift )
 import Control.Monad.Trans.Maybe                  ( MaybeT ( .. ), runMaybeT )
@@ -22,7 +23,8 @@ import qualified Data.Traversable as T            ( sequence )
 import GHC.IO.Encoding                            ( setLocaleEncoding, utf8 )
 
 import Network                                    ( withSocketsDo )
-import Network.HTTP.Conduit                       ( simpleHttp )
+import Network.HTTP.Conduit                       ( simpleHttp, HttpException )
+import Network.HTTP.Types                 --( StatusCodeException )
 
 import System.Directory                           ( createDirectory, doesDirectoryExist, doesFileExist )
 import System.Environment                         ( getArgs )
@@ -324,13 +326,17 @@ keepUserLocal :: Refresh -> Bool
 keepUserLocal OnlyAchievable = True
 keepUserLocal _              = False
 
+catchAny :: HttpException -> IO ByteString
+catchAny _ = return (pack "")
+
 -- Monadic if-then-else construct that either reads from the file supplied in the second
 -- argument (if the first one is True) or performs an external query using the query
 -- string in the third argument.
 
 readOrFetch :: Bool -> String -> String -> IO ByteString
-readOrFetch b local fetch | b         = readFile local
-                          | otherwise = simpleHttp fetch
+readOrFetch b local fetch 
+  | b         = readFile local
+  | otherwise = simpleHttp fetch `E.catch` catchAny
 
 -- A string that denotes the required JSON format.
 
