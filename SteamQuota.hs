@@ -91,7 +91,7 @@ toBool 0 = False
 toBool _ = True
     
 -- The meta-data of a game consists of a player for which the data is checked,
--- the name of the game and the list of a achivements achieved by the player.
+-- the name of the game and the list of a achievements achieved by the player.
 
 data GameStats = GameStats { playerID :: Id,                -- stats for which player?
                              gameName :: String,            -- name of the game
@@ -467,8 +467,9 @@ main = withSocketsDo $ do
             recent <- simpleHttp (recentQuery ++ querySuffix)
             let gamesOwned  = fmap gamesList (decode owned) :: Maybe [Game]
                 gamesRecent = fmap recentGames (decode recent) :: Maybe [Game]
-                updateUser g = maybe (keepUserLocal refresh) 
-                                     (\rs ->    (g `notElem` rs || keepUserLocal refresh)
+                local       = keepUserLocal refresh
+                updateUser g = maybe local
+                                     (\rs ->    (g `notElem` rs || local)
                                              && (g `elem` rs || refresh == Recent || refresh == OnlyAchieved))
                                      gamesRecent
             case gamesOwned of
